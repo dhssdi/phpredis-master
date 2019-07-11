@@ -1251,15 +1251,6 @@ static int gen_varkey_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
     return SUCCESS;
 }
 
-/* Generic handling of every blocking pop command (BLPOP, BZPOP[MIN/MAX], etc */
-int redis_blocking_pop_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
-                           char *kw, char **cmd, int *cmd_len, short *slot,
-                           void **ctx)
-{
-    return gen_varkey_cmd(INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock, kw,
-        strlen(kw), 2, 2, cmd, cmd_len, slot);
-}
-
 /*
  * Commands with specific signatures or that need unique functions because they
  * have specific processing (argument validation, etc) that make them unique
@@ -2797,10 +2788,9 @@ void append_georadius_opts(RedisSock *redis_sock, smart_string *str, short *slot
     }
 }
 
-/* GEORADIUS / GEORADIUS_RO */
+/* GEORADIUS */
 int redis_georadius_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
-                        char *kw, char **cmd, int *cmd_len, short *slot,
-                        void **ctx)
+                        char **cmd, int *cmd_len, short *slot, void **ctx)
 {
     char *key, *unit;
     short store_slot = 0;
@@ -2833,7 +2823,7 @@ int redis_georadius_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
             (gopts.store != STORE_NONE ? 2 : 0);
 
     /* Begin construction of our command */
-    redis_cmd_init_sstr(&cmdstr, argc, kw, strlen(kw));
+    REDIS_CMD_INIT_SSTR_STATIC(&cmdstr, argc, "GEORADIUS");
 
     /* Prefix and set slot */
     keyfree = redis_key_prefix(redis_sock, &key, &keylen);
@@ -2868,11 +2858,9 @@ int redis_georadius_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
     return SUCCESS;
 }
 
-/* GEORADIUSBYMEMBER/GEORADIUSBYMEMBER_RO
- *    key member radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count] */
+/* GEORADIUSBYMEMBER key member radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count] */
 int redis_georadiusbymember_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
-                                char *kw, char **cmd, int *cmd_len, short *slot,
-                                void **ctx)
+                                char **cmd, int *cmd_len, short *slot, void **ctx)
 {
     char *key, *mem, *unit;
     strlen_t keylen, memlen, unitlen;
@@ -2902,7 +2890,7 @@ int redis_georadiusbymember_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_s
             (gopts.store != STORE_NONE ? 2 : 0);
 
     /* Begin command construction*/
-    redis_cmd_init_sstr(&cmdstr, argc, kw, strlen(kw));
+    REDIS_CMD_INIT_SSTR_STATIC(&cmdstr, argc, "GEORADIUSBYMEMBER");
 
     /* Prefix our key if we're prefixing and set the slot */
     keyfree = redis_key_prefix(redis_sock, &key, &keylen);
@@ -3051,6 +3039,22 @@ int redis_watch_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
 {
     return gen_varkey_cmd(INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock,
         "WATCH", sizeof("WATCH")-1, 1, 0, cmd, cmd_len, slot);
+}
+
+/* BLPOP */
+int redis_blpop_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
+                    char **cmd, int *cmd_len, short *slot, void **ctx)
+{
+    return gen_varkey_cmd(INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock,
+        "BLPOP", sizeof("BLPOP")-1, 2, 1, cmd, cmd_len, slot);
+}
+
+/* BRPOP */
+int redis_brpop_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
+                    char **cmd, int *cmd_len, short *slot, void **ctx)
+{
+    return gen_varkey_cmd(INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock,
+        "BRPOP", sizeof("BRPOP")-1, 1, 1, cmd, cmd_len, slot);
 }
 
 /* SINTER */
@@ -3718,21 +3722,20 @@ int redis_xclaim_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
 }
 
 /* XGROUP HELP
- * XGROUP CREATE key groupname id [MKSTREAM]
  * XGROUP SETID key group id
- * XGROUP DESTROY key groupname
+ * XGROUP DELGROUP key groupname
+ * XGROUP CREATE key groupname id
  * XGROUP DELCONSUMER key groupname consumername */
 int redis_xgroup_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
                      char **cmd, int *cmd_len, short *slot, void **ctx)
 {
     char *op, *key = NULL, *arg1 = NULL, *arg2 = NULL;
     strlen_t oplen, keylen, arg1len, arg2len;
-    zend_bool mkstream = 0;
     int argc = ZEND_NUM_ARGS();
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|sssb", &op, &oplen,
-                              &key, &keylen, &arg1, &arg1len, &arg2, &arg2len,
-                              &mkstream) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|ssss", &op, &oplen,
+                              &key, &keylen, &arg1, &arg1len, &arg2, &arg2len)
+                              == FAILURE)
     {
         return FAILURE;
     }
@@ -3740,23 +3743,14 @@ int redis_xgroup_cmd(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
     if (argc == 1 && oplen == 4 && !strncasecmp(op, "HELP", 4)) {
         *cmd_len = REDIS_CMD_SPPRINTF(cmd, "XGROUP", "s", "HELP", 4);
         return SUCCESS;
-    } else if (argc >= 4 && (oplen == 6 && !strncasecmp(op, "CREATE", 6))) {
-        if (mkstream) {
-            *cmd_len = REDIS_CMD_SPPRINTF(cmd, "XGROUP", "sksss", op, oplen, key, keylen,
-                                          arg1, arg1len, arg2, arg2len, "MKSTREAM",
-                                          sizeof("MKSTREAM") - 1);
-        } else {
-            *cmd_len = REDIS_CMD_SPPRINTF(cmd, "XGROUP", "skss", op, oplen, key, keylen,
-                                          arg1, arg1len, arg2, arg2len);
-        }
-        return SUCCESS;
     } else if (argc == 4 && ((oplen == 5 && !strncasecmp(op, "SETID", 5)) ||
+                             (oplen ==  6 && !strncasecmp(op, "CREATE", 6)) ||
                              (oplen == 11 && !strncasecmp(op, "DELCONSUMER", 11))))
     {
         *cmd_len = REDIS_CMD_SPPRINTF(cmd, "XGROUP", "skss", op, oplen, key, keylen,
                                       arg1, arg1len, arg2, arg2len);
         return SUCCESS;
-    } else if (argc == 3 && ((oplen == 7 && !strncasecmp(op, "DESTROY", 7)))) {
+    } else if (argc == 3 && ((oplen == 7 && !strncasecmp(op, "DELGROUP", 7)))) {
         *cmd_len = REDIS_CMD_SPPRINTF(cmd, "XGROUP", "sks", op, oplen, key,
                                       keylen, arg1, arg1len);
         return SUCCESS;

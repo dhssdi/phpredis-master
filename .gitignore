@@ -16,4 +16,3 @@ mkinstalldirs
 run-tests.php
 idea/*
 .cquery
-tags
